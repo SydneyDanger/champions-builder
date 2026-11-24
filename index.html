@@ -151,6 +151,9 @@
     .bring-sum { margin: 0.3rem 0; font-size: 0.85rem; }
     .bring-pick { padding: 0.35rem 0.7rem; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: #cbd5e1; cursor: pointer; }
     .bring-pick.on { border-color: var(--accent); background: rgba(59,130,246,0.18); color: #fff; }
+    .bring-pick.lead { border-color: var(--green); background: rgba(34,197,94,0.2); }
+    .drill-clock { float: right; font-variant-numeric: tabular-nums; font-size: 0.95rem; }
+    .drill-clock.low { color: var(--danger); }
     .practice-res { margin-top: 0.6rem; padding: 0.5rem 0.7rem; border-radius: 8px; background: rgba(250,204,21,0.08); border: 1px solid rgba(250,204,21,0.3); }
     .calc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 0.8rem; margin-top: 0.8rem; }
     .calc-card .calc-head { margin-bottom: 0.2rem; }
@@ -528,7 +531,8 @@
           <select id="oppSel" class="tour-select"></select>
           <button class="primary" onclick="setOpponent('select')">Use team</button>
           <button class="secondary" onclick="setOpponent('random')" title="Random tournament team">🎲 Random opponent</button>
-          <label class="smart" title="Hide the suggestion: pick your 4 first, then reveal what the calc favours"><input type="checkbox" id="practiceMode" onchange="renderMatchup()" /> Practice mode</label>
+          <label class="smart" title="Hide the suggestion: pick your 4 first, then reveal what the calc favours"><input type="checkbox" id="practiceMode" onchange="resetDrill(); renderMatchup()" /> Practice mode</label>
+          <button class="secondary" onclick="startDrill()" title="Random opponent, 90-second timer, pick your 4 and leads, then see how the calc scores it">⏱ Team preview drill</button>
         </div>
         <details class="sub-fold"><summary>…or paste the opponent's team</summary>
           <textarea id="oppPaste" class="import-box" placeholder="Paste a Showdown / Poképaste team…"></textarea>
@@ -3851,7 +3855,7 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
       });
       renderCalcTab(team);
       const mp = document.querySelector('.tab-pane[data-pane="matchup"]');
-      if (mp && mp.classList.contains("active")) { practiceRevealed = false; practicePick = new Set(); renderMatchup(); }
+      if (mp && mp.classList.contains("active")) { resetDrill(); renderMatchup(); }
     }
     function renderCalcTab(team) {
       const el = document.getElementById("calcTab"); if (!el) return;
@@ -3868,7 +3872,22 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
       }).join("");
     }
     // ===================== Matchup + bring-4 practice =====================
-    let oppTeam = [], oppName = "", practicePick = new Set(), practiceRevealed = false;
+    let oppTeam = [], oppName = "", practicePick = new Set(), practiceRevealed = false, practiceLead = new Set(), drillT0 = 0, drillPending = false;
+    const DRILL_SECS = 90;
+    function resetDrill() { practicePick = new Set(); practiceLead = new Set(); practiceRevealed = false; drillPending = false; drillT0 = Date.now(); }
+    function revealDrill() { if (practiceRevealed) return; practiceRevealed = true; drillPending = true; renderMatchup(); }
+    function drillTick() {
+      const pane = document.querySelector('.tab-pane[data-pane="matchup"]'), c = document.getElementById("drillClock");
+      if (!c || practiceRevealed || !pane.classList.contains("active")) return;
+      const left = Math.max(0, DRILL_SECS - Math.floor((Date.now() - drillT0) / 1000));
+      c.textContent = `⏱ ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`; c.classList.toggle("low", left <= 15);
+      if (!left) revealDrill();
+    }
+    setInterval(drillTick, 1000);
+    const drillStats = () => { try { return JSON.parse(localStorage.getItem("drillStats")) || []; } catch { return []; } };
+    function saveDrill(r) { const a = drillStats(); a.push(r); try { localStorage.setItem("drillStats", JSON.stringify(a.slice(-500))); } catch {} }
+    function resetDrillStats() { if (!confirm("Clear your drill history?")) return; try { localStorage.removeItem("drillStats"); } catch {} renderMatchup(); }
+    function startDrill() { showTab("matchup"); document.getElementById("practiceMode").checked = true; setOpponent("random"); }
     function tourTeamObjs(t) {
       const listed = new Set();
       const team = t.mons.map(n => POKEDEX.find(p => p.name === n)).filter(Boolean).map(p => {
@@ -3899,7 +3918,7 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
         if (v[0] === "c") { const t = COMMUNITY_TEAMS[+v.slice(1)]; oppTeam = communityTeamObjs(t); oppName = t.name; }
         else { const t = TOURNAMENT_TEAMS[+v.slice(1)]; oppTeam = tourTeamObjs(t); oppName = t.name; }
       }
-      practicePick = new Set(); practiceRevealed = false;
+      resetDrill();
       renderMatchup();
     }
     // ponytail: unbounded-ish memo (cleared at 200k entries); duel() is pure in (attacker set, defender set)
@@ -3957,17 +3976,22 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
       const M = M0 || matchupMatrix(us, them);
       const all = combos(us.length, Math.min(4, us.length)).map(c => ({ c, s: scoreBring(M, us, c) })).sort((a, b) => b.s - a.s);
       const best = all[0];
-      // leads: the pair from the four with the best combined pressure (+ Fake Out / speed control)
-      const leads = combos(best.c.length, 2).map(p => p.map(i => best.c[i])).map(pair => {
-        let s = 0; for (let j = 0; j < them.length; j++) s += Math.max(...pair.map(i => M[i][j].v));
+      return { M, all, best, leads: rankLeads(M, us, best.c)[0] };
+    }
+    // Lead pairs from a bring-4, best first: combined pressure on their six (+ Fake Out / speed control)
+    function rankLeads(M, us, four) {
+      return combos(four.length, 2).map(p => p.map(i => four[i])).map(pair => {
+        let s = 0; for (let j = 0; j < M[0].length; j++) s += Math.max(...pair.map(i => M[i][j].v));
         pair.forEach(i => { const f = roleFlags(us[i]); if (f.fakeOut) s += 0.5; if (f.speedCtrl) s += 0.4; });
         return { pair, s };
-      }).sort((a, b) => b.s - a.s)[0];
-      return { M, all, best, leads };
+      }).sort((a, b) => b.s - a.s);
     }
     function togglePractice(i) {
       if (practiceRevealed) return;
-      practicePick.has(i) ? practicePick.delete(i) : (practicePick.size < 4 && practicePick.add(i));
+      // click cycles: off → bring → lead → off
+      if (!practicePick.has(i)) { if (practicePick.size < 4) practicePick.add(i); }
+      else if (!practiceLead.has(i) && practiceLead.size < 2) practiceLead.add(i);
+      else { practicePick.delete(i); practiceLead.delete(i); }
       renderMatchup();
     }
     function renderMatchup() {
@@ -3988,32 +4012,47 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
       let practiceHTML = "";
       if (practice) {
         const picks = [...practicePick].sort((a, b) => a - b);
+        const win = s => 1 / (1 + Math.exp(-MODEL.k * (s - Rt.best.s)));
         let res = "";
-        if (practiceRevealed && picks.length === 4) {
-          const mine = scoreBring(R.M, us, picks), rank = R.all.findIndex(x => x.c.join() === picks.join()) + 1;
-          res = `<div class="practice-res">Your 4 rank <strong>#${rank} of ${R.all.length}</strong> · score ${mine.toFixed(2)} vs best ${R.best.s.toFixed(2)} (${(mine / R.best.s * 100).toFixed(1)}%)${rank === 1 ? " — matches the calc's pick 🎯" : ""}</div>`;
+        if (practiceRevealed) {
+          // Timed out short of 4 = scored as the worst bring
+          const full = picks.length === 4, mine = full ? scoreBring(R.M, us, picks) : R.all[R.all.length - 1].s;
+          const rank = full ? R.all.findIndex(x => x.c.join() === picks.join()) + 1 : R.all.length;
+          const cost = (win(R.best.s) - win(mine)) * 100;
+          const L = full ? rankLeads(R.M, us, picks) : [], myLead = [...practiceLead].sort((a, b) => a - b);
+          const leadRank = full && myLead.length === 2 ? L.findIndex(x => [...x.pair].sort((a, b) => a - b).join() === myLead.join()) + 1 : 0;
+          const secs = Math.min(DRILL_SECS, Math.round((Date.now() - drillT0) / 1000));
+          if (drillPending) { drillPending = false; saveDrill({ t: Date.now(), rank, n: R.all.length, cost, leadRank, secs }); }
+          res = `<div class="practice-res">${full ? "" : "⏱ Time's up before you picked 4. Scored as the worst bring.<br>"}
+            Your 4 rank <strong>#${rank} of ${R.all.length}</strong>${rank === 1 ? " — the calc's pick 🎯" : ` · costs <strong>${cost.toFixed(1)} pts</strong> of win chance vs the calc's 4`}
+            ${full ? `<br>Your lead ${leadRank ? `ranks <strong>#${leadRank} of 6</strong>${leadRank === 1 ? " 🎯" : ` · the calc leads ${L[0].pair.map(nm).join(" + ")} from your 4`}` : "wasn't picked (click a chosen Pokémon again to mark it as a lead)"}` : ""}
+            <br><span class="muted small">${secs}s · the calc's 4: ${R.best.c.map(nm).join(", ")}, leading ${R.leads.pair.map(nm).join(" + ")}</span></div>`;
         }
-        practiceHTML = `<section class="panel"><h3>Practice: pick your 4</h3>
-          <div class="bring-row">${us.map((p, i) => `<button class="bring-pick ${practicePick.has(i) ? "on" : ""}" onclick="togglePractice(${i})">${mini(p)}${p.name}</button>`).join("")}</div>
+        const H = drillStats(), last = H.slice(-20), avg = (a, f) => a.reduce((t, x) => t + f(x), 0) / a.length;
+        const statLine = a => `calc's 4 in ${Math.round(avg(a, x => x.rank === 1) * 100)}% · avg cost ${avg(a, x => x.cost).toFixed(1)} pts · best lead ${Math.round(avg(a, x => x.leadRank === 1) * 100)}% · ${Math.round(avg(a, x => x.secs))}s`;
+        const stats = H.length ? `<div class="muted small" style="margin-top:0.5rem">📈 <strong>${H.length} drills</strong>: ${statLine(H)}${H.length > 20 ? `<br>Last 20: ${statLine(last)}` : ""} <button class="ghost" style="font-size:0.7rem;padding:0.1rem 0.4rem" onclick="resetDrillStats()">Reset</button></div>` : "";
+        practiceHTML = `<section class="panel"><h3>Team preview drill <span id="drillClock" class="drill-clock">${practiceRevealed ? "" : "⏱"}</span></h3>
+          <div class="muted small" style="margin-bottom:0.4rem">Like real team preview: ${DRILL_SECS} seconds, no calcs. Click once to bring, again to lead, a third time to drop.</div>
+          <div class="bring-row">${us.map((p, i) => `<button class="bring-pick ${practicePick.has(i) ? "on" : ""} ${practiceLead.has(i) ? "lead" : ""}" onclick="togglePractice(${i})">${mini(p)}${p.name}${practiceLead.has(i) ? " · lead" : ""}</button>`).join("")}</div>
           <div class="row-actions" style="margin-top:0.5rem">
-            <button class="primary" ${practicePick.size === 4 && !practiceRevealed ? "" : "disabled"} onclick="practiceRevealed = true; renderMatchup()">Lock in & reveal</button>
+            <button class="primary" ${practicePick.size === 4 && !practiceRevealed ? "" : "disabled"} onclick="revealDrill()">Lock in & reveal</button>
             <button class="ghost" onclick="setOpponent('random')">Next opponent 🎲</button>
-            <span class="muted small">${practicePick.size}/4 picked</span>
-          </div>${res}</section>`;
+            <span class="muted small">${practicePick.size}/4 brought · ${practiceLead.size}/2 leads</span>
+          </div>${res}${stats}</section>`;
       }
       el.innerHTML = `${practiceHTML}
         <section class="panel">
           <h3>vs ${oppName}</h3>
           <div class="muted small" style="margin-bottom:0.4rem">${them.map(p => `${mini(p)}${p.name} @ ${p.item}`).join(" · ")}</div>
-          ${hide ? `<div class="muted">Suggestion hidden — pick your 4 and reveal.</div>` : `
+          ${hide ? `<div class="muted">Calcs hidden until you lock in.</div>` : `
           <div class="bring-sum"><strong>Bring:</strong> ${R.best.c.map(nm).join(", ")} &nbsp;·&nbsp; <strong>Lead:</strong> ${R.leads.pair.map(nm).join(" + ")}
             &nbsp;·&nbsp; <span class="muted">They likely bring: ${Rt.best.c.map(i => them[i].name).join(", ")} (lead ${Rt.leads.pair.map(i => them[i].name).join(" + ")})</span></div>
           <div class="muted small">Runner-up 4s: ${R.all.slice(1, 3).map(x => x.c.map(nm).join(", ") + ` (${Math.round(x.s / R.best.s * 100)}%)`).join(" · ")}</div>`}
-          <div class="mu-wrap"><table class="mu-table">
+          ${hide ? "" : `<div class="mu-wrap"><table class="mu-table">
             <tr><th></th>${them.map(p => `<th>${mini(p)}${p.name}</th>`).join("")}</tr>
             ${us.map((p, i) => `<tr class="${!hide && R.best.c.includes(i) ? "brought" : ""}"><th>${mini(p)}${p.name}</th>${R.M[i].map(cell).join("")}</tr>`).join("")}
           </table></div>
-          <div class="muted small">⚔ your best hit on them · 🛡 their best hit on you · 💨 who moves first (no Tailwind/TR). Green = you win the 1-on-1, red = you lose it. Hover a cell for the moves.</div>
+          <div class="muted small">⚔ your best hit on them · 🛡 their best hit on you · 💨 who moves first (no Tailwind/TR). Green = you win the 1-on-1, red = you lose it. Hover a cell for the moves.</div>`}
         </section>`;
     }
     // Tabs
@@ -4650,6 +4689,7 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
       ["Open Showdown damage calc", "", () => openCalc()],
       ["Lock all", "", lockAll], ["Unlock all", "", unlockAll],
       ["Random opponent", "", () => { setOpponent("random"); showTab("matchup"); }],
+      ["Team preview drill (timed)", "", startDrill],
       ...["team", "analysis", "matchup", "gauntlet", "calc", "teams"].map(t => ["Go to " + (document.querySelector(`.tab[data-tab="${t}"]`) || {}).textContent, "", () => showTab(t)]),
       ["Settings", "", openSettings]
     ];
