@@ -2945,8 +2945,11 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
       STAT_KEYS.forEach(k => o[k] = calcStat(b[k], sp[k] || 0, p.nature, k));
       return o;
     }
-    const TYPE_ITEM = { "Charcoal":"Fire","Mystic Water":"Water","Miracle Seed":"Grass","Never-Melt Ice":"Ice","Black Glasses":"Dark","Silk Scarf":"Normal","Fairy Feather":"Fairy" };
-    const RESIST_BERRY = { "Babiri Berry":"Steel","Chople Berry":"Fighting","Colbur Berry":"Dark","Haban Berry":"Dragon","Occa Berry":"Fire","Passho Berry":"Water","Rindo Berry":"Grass","Roseli Berry":"Fairy" };
+    const TYPE_ITEM = { "Charcoal":"Fire","Mystic Water":"Water","Miracle Seed":"Grass","Never-Melt Ice":"Ice","Black Glasses":"Dark","Silk Scarf":"Normal","Fairy Feather":"Fairy",
+      "Magnet":"Electric","Dragon Fang":"Dragon","Sharp Beak":"Flying","Black Belt":"Fighting","Soft Sand":"Ground","Hard Stone":"Rock","Metal Coat":"Steel",
+      "Poison Barb":"Poison","Spell Tag":"Ghost","Twisted Spoon":"Psychic","Silver Powder":"Bug" };
+    const RESIST_BERRY = { "Babiri Berry":"Steel","Chople Berry":"Fighting","Colbur Berry":"Dark","Haban Berry":"Dragon","Occa Berry":"Fire","Passho Berry":"Water","Rindo Berry":"Grass","Roseli Berry":"Fairy",
+      "Kasib Berry":"Ghost","Shuca Berry":"Ground","Coba Berry":"Flying","Charti Berry":"Rock","Wacan Berry":"Electric","Yache Berry":"Ice","Kebia Berry":"Poison","Payapa Berry":"Psychic","Tanga Berry":"Bug" };
     const WEATHER_AB = { "Drizzle":"rain","Drought":"sun","Sand Stream":"sand","Snow Warning":"snow" };
     const TERRAIN_AB = { "Grassy Surge":"grassy","Psychic Surge":"psychic","Electric Surge":"electric","Misty Surge":"misty" };
     const ATE = { "Aerilate":"Flying","Pixilate":"Fairy","Refrigerate":"Ice","Galvanize":"Electric","Dragonize":"Dragon" };
@@ -3382,8 +3385,14 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
       add(protects >= 3, 4, "Protect", `${protects}/6 carry Protect`, -4);
       const spread = t.filter(p => has(p, SPREAD_MOVES)).length;
       add(spread >= 1, 4, "Spread damage", `${spread} spread attacker${spread === 1 ? "" : "s"}`, -4);
-      const eq = t.filter(p => has(p, ["Earthquake","Bulldoze","Discharge","Surf"]));
-      if (eq.length) { const safe = t.some(p => !eq.includes(p) && (defMultiplierFor(p, "Ground") === 0 || has(p, ["Protect","Detect"]))); add(safe, 3, "Earthquake-safe partner", safe ? "Flying / Levitate / Protect partner" : `${eq[0].name}'s spread move hits its partner`, -3); }
+      const ALLY_HIT = { "Earthquake": "Ground", "Bulldoze": "Ground", "Discharge": "Electric", "Surf": "Water" };
+      const eq = t.filter(p => (p.moves || []).some(m => ALLY_HIT[m]));
+      if (eq.length) {
+        // each user needs a partner that resists or is immune to every ally-hitting type it carries (or has Protect)
+        const bad = eq.find(u => { const ty = [...new Set(u.moves.filter(m => ALLY_HIT[m]).map(m => ALLY_HIT[m]))];
+          return !t.some(p => p !== u && (ty.every(x => defMultiplierFor(p, x) < 1) || has(p, ["Protect","Detect"]))); });
+        add(!bad, 3, "Spread-move-safe partner", bad ? `${bad.name}'s ${bad.moves.filter(m => ALLY_HIT[m]).join(" / ")} hits its partner hard` : "a partner resists, is immune or can Protect", -3);
+      }
       // --- Victor (victorpoke-champions.com) guide checks ---
       // Mistake 1: every slot needs a job (damage, speed control, switch-in, support)
       const jobless = t.filter(p => { const f = roleFlags(p); return !isAttacker(p) && !f.speedCtrl && !f.fakeOut && !f.redirect && !f.intimidate && !f.weather && (p.bulkScore || 0) < 7 &&
@@ -3481,7 +3490,9 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
 
     // Level 50 Speed: 1 SP = +1 stat point (verified against in-game replica screens)
     function effectiveSpe(p, mode) {
-      // Level 50, IV 31; 1 SP = +1 stat point (verify against in-game values)
+      // Same formula as the calc (nature, Scarf, own-weather speed abilities, Tailwind)
+      const v = speedOf(p, mode === "tailwind" ? { tailwind: true } : null); if (v) return v;
+      // fallback for entries without base stats
       const base = baseSpe(p);
       const sp = Math.min(32, (p.sp && p.sp.spe) || 0);
       let val = Math.floor((2 * base + 31) / 2) + 5 + sp;
@@ -3932,7 +3943,11 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
     }
     function duelRaw(a, b) {
       let best = null; const f = selfField(a), fb = selfField(b);
-      if (!f.weather) f.weather = fb.weather; if (!f.terrain) f.terrain = fb.terrain; // shared field: defender's setter counts too
+      // One shared field. Two setters: the slower one activates last and its weather/terrain stays; a speed tie counts neither.
+      for (const k of ["weather", "terrain"]) {
+        if (f[k] && fb[k] && f[k] !== fb[k]) { const sa = speedOf(a), sb = speedOf(b); f[k] = sa < sb ? f[k] : sa > sb ? fb[k] : null; }
+        else f[k] = f[k] || fb[k];
+      }
       (a.moves || []).forEach(m => {
         if (!MOVE_DATA[m] || m === "Fake Out") return;
         const r = calcDamage(a, b, m, f); if (!r) return;
@@ -3948,11 +3963,17 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
     // The old k = 0.9 scored ΔLL −27 (badly overconfident). Weights def/spe/avg/role: a grid search couldn't tell them apart, so they're unchanged.
     // Re-run this check when new brackets are added.
     const MODEL = { def: 0.6, spe: 0.25, avg: 0.35, role: 1, k: 0.15 };
-    const cellV = (off, def, sa, sb) => off.o - MODEL.def * def.o + MODEL.spe * (sa > sb ? 1 : sa === sb ? 0.5 : 0);
+    // fa: 1 = we move first, 0 = they do, 0.5 = speed tie
+    const cellV = (off, def, fa) => off.o - MODEL.def * def.o + MODEL.spe * fa;
+    const hasTR = team => team.some(p => (p.moves || []).includes("Trick Room"));
     function matchupMatrix(us, them) {
+      // Trick Room flips the order when either Pokémon is a TR set whose team has a setter.
+      // ponytail: assumes the setter is brought and gets TR up; per-bring TR would need the matrix per 4.
+      const trU = hasTR(us), trT = hasTR(them);
       return us.map(a => them.map(b => {
         const off = duel(a, b), def = duel(b, a), sa = speedOf(a), sb = speedOf(b);
-        return { off, def, sa, sb, v: cellV(off, def, sa, sb) };
+        const tr = (trU && isTRSet(a)) || (trT && isTRSet(b)), fa = sa === sb ? 0.5 : (sa > sb) !== tr ? 1 : 0;
+        return { off, def, sa, sb, tr, fa, v: cellV(off, def, fa) };
       }));
     }
     function scoreBring(M, us, idxs) {
@@ -3970,7 +3991,7 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
     function combos(n, k) { const out = []; const rec = (st, acc) => { if (acc.length === k) { out.push(acc.slice()); return; } for (let i = st; i < n; i++) { acc.push(i); rec(i + 1, acc); acc.pop(); } }; rec(0, []); return out; }
     // The same matrix seen from the other side (no recomputation)
     function flipMatrix(M) {
-      return M[0].map((_, j) => M.map(row => { const c = row[j]; return { off: c.def, def: c.off, sa: c.sb, sb: c.sa, v: cellV(c.def, c.off, c.sb, c.sa) }; }));
+      return M[0].map((_, j) => M.map(row => { const c = row[j]; return { off: c.def, def: c.off, sa: c.sb, sb: c.sa, tr: c.tr, fa: 1 - c.fa, v: cellV(c.def, c.off, 1 - c.fa) }; }));
     }
     function bestBring(us, them, M0) {
       const M = M0 || matchupMatrix(us, them);
@@ -4007,7 +4028,7 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
       const cell = c => {
         const col = c.v > 0.6 ? "good" : c.v < -0.3 ? "bad" : "mid";
         return `<td class="mu ${col}" title="You: ${c.off.m} ${c.off.lo}–${c.off.hi}% · Them: ${c.def.m} ${c.def.lo}–${c.def.hi}% · Spe ${c.sa} vs ${c.sb}">
-          <div>⚔ ${c.off.lo}–${c.off.hi}%</div><div>🛡 ${c.def.lo}–${c.def.hi}%</div><div>${c.sa > c.sb ? "💨 faster" : c.sa < c.sb ? "🐢 slower" : "= tie"}</div></td>`;
+          <div>⚔ ${c.off.lo}–${c.off.hi}%</div><div>🛡 ${c.def.lo}–${c.def.hi}%</div><div>${c.fa === 0.5 ? "= tie" : c.fa ? "💨 first" : "🐢 second"}${c.tr ? " (TR)" : ""}</div></td>`;
       };
       let practiceHTML = "";
       if (practice) {
@@ -4052,7 +4073,7 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
             <tr><th></th>${them.map(p => `<th>${mini(p)}${p.name}</th>`).join("")}</tr>
             ${us.map((p, i) => `<tr class="${!hide && R.best.c.includes(i) ? "brought" : ""}"><th>${mini(p)}${p.name}</th>${R.M[i].map(cell).join("")}</tr>`).join("")}
           </table></div>
-          <div class="muted small">⚔ your best hit on them · 🛡 their best hit on you · 💨 who moves first (no Tailwind/TR). Green = you win the 1-on-1, red = you lose it. Hover a cell for the moves.</div>`}
+          <div class="muted small">⚔ your best hit on them · 🛡 their best hit on you · 💨 who moves first (Trick Room counted when a slow TR set's team has a setter; no Tailwind). Green = you win the 1-on-1, red = you lose it. Hover a cell for the moves.</div>`}
         </section>`;
     }
     // Tabs
@@ -4476,12 +4497,30 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
         .map(p => { const si = getSetsFor(p).findIndex(s => s.label === (t.sets || {})[p.name]); return applySet(p, si >= 0 ? si : 0); });
     }
     let _field = null;
-    function allOpponents() {
-      return _field || (_field = [
-        ...TOURNAMENT_TEAMS.map((t, i) => ({ id: "t" + i, name: t.name, team: tourTeamObjs(t) })),
-        ...COMMUNITY_TEAMS.map((t, i) => ({ id: "c" + i, name: (t.yt ? "YouTube: " : "Community: ") + t.name, team: communityTeamObjs(t) }))
-      ].filter(o => o.team.length >= 4));
+    // Date from the team name: "(15 Nov 2026)", "(Nov 1)", "(… Nov 23)"; year defaults to 2026
+    function dateOf(name) {
+      const m = name.match(/\((?:[^()]*?\b)?(?:(\d{1,2}) ([A-Z][a-z]{2})|([A-Z][a-z]{2}) (\d{1,2}))(?:,? (\d{4}))?\)/);
+      const t = m ? Date.parse(`${m[2] || m[3]} ${m[1] || m[4]} ${m[5] || 2026}`) : NaN;
+      return isNaN(t) ? null : t;
     }
+    const FIELD_HALF_LIFE_DAYS = 30;
+    function allOpponents() {
+      if (_field) return _field;
+      const f = [
+        ...TOURNAMENT_TEAMS.map((t, i) => ({ id: "t" + i, name: t.name, ev: t.event, team: tourTeamObjs(t), src: 1 })),
+        ...COMMUNITY_TEAMS.map((t, i) => ({ id: "c" + i, name: (t.yt ? "YouTube: " : "Community: ") + t.name, team: communityTeamObjs(t), src: 0.5 }))
+      ].filter(o => o.team.length >= 4);
+      // Undated teams take their event's date, else the median date
+      f.forEach(o => o.d = dateOf(o.name));
+      const evD = {}; f.forEach(o => { if (o.ev && o.d) evD[o.ev] = o.d; });
+      const ds = f.map(o => o.d || (o.ev && evD[o.ev])).filter(Boolean).sort((a, b) => a - b), med = ds[ds.length >> 1], newest = ds[ds.length - 1];
+      f.forEach(o => { o.d = o.d || (o.ev && evD[o.ev]) || med; o.use = o.team.reduce((s, p) => s + (p.usage || 0.3), 0) / o.team.length; });
+      const useAvg = f.reduce((s, o) => s + o.use, 0) / f.length;
+      // ponytail: sqrt keeps one all-meta team from drowning the rest; recency halves every 30 days
+      f.forEach(o => o.w = o.src * Math.sqrt(o.use / useAvg) * 0.5 ** ((newest - o.d) / 864e5 / FIELD_HALF_LIFE_DAYS));
+      return _field = f;
+    }
+    const wAvg = (list, val) => { let s = 0, w = 0; list.forEach(o => { s += o.w * val(o); w += o.w; }); return s / w; };
     function matchOdds(us, them) {
       const M = matchupMatrix(us, them), R = bestBring(us, them, M), Rt = bestBring(them, us, flipMatrix(M));
       return { p: 1 / (1 + Math.exp(-MODEL.k * (R.best.s - Rt.best.s))), M, bring: R.best.c, lead: R.leads.pair, theirs: Rt.best.c };
@@ -4506,7 +4545,7 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
     }
 
     function renderGauntlet(us, res) {
-      const n = res.length, avg = res.reduce((a, r) => a + r.p, 0) / n;
+      const n = res.length, avg = wAvg(res.map(r => ({ w: r.opp.w, p: r.p })), r => r.p);
       const prev = lastGauntlet; lastGauntlet = { avg, key: us.map(p => p.name).join() };
       const delta = prev ? (avg - prev.avg) * 100 : null;
       const pct = x => (x * 100).toFixed(1) + "%";
@@ -4530,7 +4569,7 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
       const dead = bring.map((b, i) => [b, i]).filter(([b]) => b < 0.2).map(([b, i]) => us[i].name);
       document.getElementById("gauntletOut").innerHTML = `
         <section class="panel"><div class="g-hero">
-          <div><div class="muted small">Expected win rate vs ${n} teams</div><div class="g-big" style="color:${col(avg)}">${pct(avg)}</div>
+          <div><div class="muted small" title="Each team counts by how common its Pokémon are and how recent it is (weight halves every ${FIELD_HALF_LIFE_DAYS} days); community teams count half">Expected win rate vs ${n} teams · weighted by usage &amp; recency</div><div class="g-big" style="color:${col(avg)}">${pct(avg)}</div>
             ${delta != null ? `<div class="g-delta ${delta >= 0 ? "up" : "down"}">${delta >= 0 ? "▲" : "▼"} ${Math.abs(delta).toFixed(1)} pts vs last run</div>` : ""}
             <div class="muted small">Favoured in ${res.filter(r => r.p > 0.55).length} · close in ${res.filter(r => r.p >= 0.45 && r.p <= 0.55).length} · unfavoured in ${res.filter(r => r.p < 0.45).length}</div></div>
           <div class="g-hist" title="How many opponents fall in each win-chance band (25% → 75%, 5 pts each; the ends include everything beyond)">${hist.map((h, i) => `<div style="height:${h / hMax * 100}%;background:${col((i + 0.5) / 10)}" title="${25 + i * 5}–${30 + i * 5}%: ${h} teams"></div>`).join("")}</div>
@@ -4556,9 +4595,8 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
     // ===== Evolve: hill-climb the team against the field =====
     function evoFitness(team, sample) {
       const us = team.map(activeTeamMember);
-      let s = 0; sample.forEach(o => s += matchOdds(us, o.team).p);
       const shared = worstSharedWeak(us).n > MAX_SHARED_WEAK ? 0.015 : 0;
-      return s / sample.length + evaluateTeam(team).score / 15000 - shared;
+      return wAvg(sample, o => matchOdds(us, o.team).p) + evaluateTeam(team).score / 15000 - shared;
     }
     function evoMutate(team) {
       const free = team.map((_, i) => i).filter(i => !locked.has(team[i].name));
@@ -4604,7 +4642,7 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
     // Pure expected win rate vs every known team (what the Gauntlet headline shows)
     function fieldWinRate(team) {
       const us = team.map(activeTeamMember), field = allOpponents();
-      return field.reduce((s, o) => s + matchOdds(us, o.team).p, 0) / field.length;
+      return wAvg(field, o => matchOdds(us, o.team).p);
     }
     // Systematic pass: for each unlocked slot, try every other listed set and the top legal Pokémon; keep the best
     async function polish(team, sample, run, say) {
