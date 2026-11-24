@@ -545,6 +545,8 @@
         <div class="muted small">Plays your team against every tournament and community team in the app (<span id="gCount"></span> teams). In each match both sides pick their best 4 with the damage calc, and the score gap becomes a win chance. It's a model, not a battle sim, so use it to compare versions of your team. <strong>Evolve</strong> keeps swapping unlocked members and sets, and keeps a change only if it beats the field more often. Lock the Pokémon you won't give up.</div>
         <div class="row-actions" style="flex-wrap:wrap">
           <button class="primary" onclick="runGauntlet()">▶ Run gauntlet</button>
+          <button class="primary" onclick="findBestTeam()" title="Search from many fresh teams (locks respected) for the highest expected win rate vs the whole field">🏆 Find best team</button>
+          <label class="smart">Search size <select id="bestRestarts"><option value="4">Quick (4)</option><option value="8" selected>Normal (8)</option><option value="20">Deep (20)</option></select></label>
           <button class="secondary" onclick="evolveTeam()" title="Hill-climb: mutate one unlocked slot at a time, keep it if the gauntlet win rate goes up">🧬 Evolve team</button>
           <label class="smart">Generations <select id="evoGens"><option>30</option><option selected>60</option><option>120</option></select></label>
           <button class="ghost" onclick="stopGauntlet()">Stop</button>
@@ -4530,31 +4532,99 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
       if (megaCount(t) < Math.min(MIN_MEGAS, megaCount(team))) return null;
       return { t: enforceItems(t, new Set(rest.map(p => p.name))), msg: `${old.name} → ${q.name}` };
     }
+    // ponytail: fixed sample (every 3rd team) keeps each step fast and comparisons fair; final picks are checked on the full field
+    const evoSample = () => allOpponents().filter((_, i) => i % 3 === 0);
+    function evoLogger() {
+      const log = document.getElementById("evoLog"); log.innerHTML = "";
+      return h => { log.innerHTML += h + "\n"; log.scrollTop = log.scrollHeight; };
+    }
+    const fmt = f => (f * 100).toFixed(1);
+    // Random-mutation hill-climb from `start`. Returns the best team found (stops early if the run is cancelled).
+    async function climb(start, sample, gens, run, say, tag) {
+      let best = start.slice(), bestFit = evoFitness(best, sample), wins = 0;
+      for (let g = 1; g <= gens; g++) {
+        if (run !== gRun) break;
+        if (g % 2 === 1) { setProg(`${tag}generation ${g}/${gens}…`); await tick(); }
+        for (let k = 0; k < 3; k++) { // 3 tries per generation
+          const m = evoMutate(best); if (!m) continue;
+          const f = evoFitness(m.t, sample);
+          if (f > bestFit + 0.001) { if (say) say(`Gen ${g} · <b>${m.msg}</b> · ${fmt(bestFit)} → ${fmt(f)}`); best = m.t; bestFit = f; wins++; break; }
+        }
+      }
+      return { team: best, fit: bestFit, wins };
+    }
+    // Pure expected win rate vs every known team (what the Gauntlet headline shows)
+    function fieldWinRate(team) {
+      const us = team.map(activeTeamMember), field = allOpponents();
+      return field.reduce((s, o) => s + matchOdds(us, o.team).p, 0) / field.length;
+    }
+    // Systematic pass: for each unlocked slot, try every other listed set and the top legal Pokémon; keep the best
+    async function polish(team, sample, run, say) {
+      let best = team.slice(), bestFit = evoFitness(best, sample);
+      for (let i = 0; i < best.length; i++) {
+        if (run !== gRun) break;
+        if (locked.has(best[i].name)) continue;
+        setProg(`Polishing slot ${i + 1}/6…`); await tick();
+        const rest = best.filter((_, j) => j !== i), used = new SpeciesSet(rest.map(p => p.name)), keep = new Set(rest.map(p => p.name));
+        const cands = [];
+        if (!best[i]._imported) visibleSetIdx(best[i], best[i]._setIndex).forEach(si => si !== (best[i]._setIndex || 0) && cands.push(applySet(best[i], si)));
+        // ponytail: top 40 by usage per slot; widen if a sleeper pick ever matters
+        POKEDEX.filter(q => !q.notLegal && baseStatsOf(q) && canAdd(rest, used, q) && !wouldBreakTypeLimit(q, rest))
+          .sort((a, b) => (b.usage || 0) - (a.usage || 0)).slice(0, 40).forEach(q => cands.push(applySet(q, 0)));
+        for (const c of cands) {
+          const t = best.slice(); t[i] = c;
+          const t2 = enforceItems(t, keep);
+          if (megaCount(t2) < Math.min(MIN_MEGAS, megaCount(best))) continue;
+          const f = evoFitness(t2, sample);
+          if (f > bestFit + 0.001) { say(`Polish · <b>${best[i].name}${c.name === best[i].name ? " set → " + c._setLabel : " → " + c.name}</b> · ${fmt(bestFit)} → ${fmt(f)}`); best = t2; bestFit = f; }
+        }
+      }
+      return best;
+    }
     async function evolveTeam() {
       if (!currentTeam.length) return toast("Generate a team first");
       if (currentTeam.every(p => locked.has(p.name))) return toast("Everything is locked. Unlock at least one slot to evolve");
       showTab("gauntlet");
-      const run = ++gRun, field = allOpponents();
-      // ponytail: fixed sample (every 3rd team) keeps each generation fast and comparisons fair; full gauntlet runs at the end
-      const sample = field.filter((_, i) => i % 3 === 0);
-      const log = document.getElementById("evoLog"), gens = +document.getElementById("evoGens").value || 60;
-      const say = h => { log.innerHTML += h + "\n"; log.scrollTop = log.scrollHeight; };
-      log.innerHTML = "";
-      let best = currentTeam.slice(), bestFit = evoFitness(best, sample), wins = 0;
-      const start = bestFit;
-      say(`Gen 0 · fitness ${(bestFit * 100).toFixed(1)} vs ${sample.length} teams`);
-      for (let g = 1; g <= gens; g++) {
-        if (run !== gRun) { say("Stopped. Keeping the best team so far."); break; }
-        setProg(`Generation ${g}/${gens}…`); await tick();
-        for (let k = 0; k < 3; k++) { // 3 tries per generation
-          const m = evoMutate(best); if (!m) continue;
-          const f = evoFitness(m.t, sample);
-          if (f > bestFit + 0.001) { say(`Gen ${g} · <b>${m.msg}</b> · ${(bestFit * 100).toFixed(1)} → ${(f * 100).toFixed(1)}`); best = m.t; bestFit = f; wins++; break; }
-        }
-      }
+      const run = ++gRun, sample = evoSample(), say = evoLogger(), gens = +document.getElementById("evoGens").value || 60;
+      const start = evoFitness(currentTeam, sample);
+      say(`Gen 0 · fitness ${fmt(start)} vs ${sample.length} teams`);
+      const r = await climb(currentTeam, sample, gens, run, say, "");
       setProg("");
-      if (!wins) { say("No mutation beat the current team. It's already at a local peak for this field."); return; }
-      say(`Done: ${wins} improvements, fitness ${(start * 100).toFixed(1)} → ${(bestFit * 100).toFixed(1)}. Ctrl+Z restores the old team.`);
+      if (run !== gRun) say("Stopped. Keeping the best team so far.");
+      if (!r.wins) { say("No mutation beat the current team. It's already at a local peak for this field."); return; }
+      say(`Done: ${r.wins} improvements, fitness ${fmt(start)} → ${fmt(r.fit)}. Ctrl+Z restores the old team.`);
+      currentTeam = r.team; refreshAll();
+      runGauntlet();
+    }
+    // Many independent climbs from fresh random teams (locks respected), then a systematic polish of the winner.
+    // ponytail: heuristic search, not exhaustive (~10^12 possible teams); more restarts = better odds of the true best
+    async function findBestTeam() {
+      if (currentTeam.length && currentTeam.every(p => locked.has(p.name))) return toast("Everything is locked. Unlock at least one slot");
+      showTab("gauntlet");
+      const run = ++gRun, sample = evoSample(), say = evoLogger();
+      const restarts = +document.getElementById("bestRestarts").value || 8, gens = 40;
+      const t0 = performance.now(), base = currentTeam.length ? fieldWinRate(currentTeam) : 0;
+      say(`Searching: ${restarts} starting teams × ${gens} generations, then a slot-by-slot polish.${currentTeam.length ? ` Current team: ${fmt(base)}% vs the full field.` : ""}`);
+      const finalists = [];
+      for (let r = 0; r < restarts && run === gRun; r++) {
+        const start = r === 0 && currentTeam.length ? currentTeam : buildCandidate();
+        const c = await climb(start, sample, gens, run, null, `Start ${r + 1}/${restarts} · `);
+        const wr = fieldWinRate(c.team);
+        finalists.push({ team: c.team, wr });
+        say(`Start ${r + 1}: ${c.team.map(p => p.name).join(", ")} · <b>${fmt(wr)}%</b>`);
+      }
+      if (!finalists.length) { setProg(""); return; }
+      finalists.sort((a, b) => b.wr - a.wr);
+      let best = finalists[0].team;
+      if (run === gRun) best = await polish(best, sample, run, say);
+      const wr = fieldWinRate(best);
+      // the polish optimizes on the sample; only keep it if it holds up on the full field
+      if (wr < finalists[0].wr) best = finalists[0].team;
+      const finalWr = Math.max(wr, finalists[0].wr);
+      setProg("");
+      if (run !== gRun) say("Stopped early. Using the best team found so far.");
+      if (currentTeam.length && finalWr <= base) { say(`Your current team (${fmt(base)}%) is still the best found. Kept it.`); return; }
+      say(`Best found: <b>${fmt(finalWr)}%</b> expected win rate vs ${allOpponents().length} teams (${((performance.now() - t0) / 1000).toFixed(0)} s). Ctrl+Z restores the old team.`);
       currentTeam = best; refreshAll();
       runGauntlet();
     }
@@ -4565,6 +4635,7 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
       ["Undo", "Ctrl+Z", undo], ["Redo", "Ctrl+Y", redo],
       ["Copy share link", "", copyShareLink],
       ["Run gauntlet vs every known team", "", () => { showTab("gauntlet"); runGauntlet(); }],
+      ["Find best team (highest expected win rate)", "", findBestTeam],
       ["Evolve team against the field", "", evolveTeam],
       ["Copy Showdown paste", "", copyPaste],
       ["Open Showdown damage calc", "", () => openCalc()],
