@@ -3923,27 +3923,35 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
       });
       return best || { o: 0, m: "—", k1: 0, k2: 0, lo: 0, hi: 0 };
     }
+    // Matchup model. k maps the bring-4 score gap to a per-game win chance.
+    // Calibrated (Nov 2026) on 94 real top-cut matches from 14 events (final, semis, quarters; Bo3, unknown pairings marginalized):
+    // the best fit was k≈0 (no signal inside a top cut); k = 0.15 is the most confident value not rejected at 95% (ΔLL −1.95 vs coin flip).
+    // The old k = 0.9 scored ΔLL −27 (badly overconfident). Weights def/spe/avg/role: a grid search couldn't tell them apart, so they're unchanged.
+    // Re-run this check when new brackets are added.
+    const MODEL = { def: 0.6, spe: 0.25, avg: 0.35, role: 1, k: 0.15 };
+    const cellV = (off, def, sa, sb) => off.o - MODEL.def * def.o + MODEL.spe * (sa > sb ? 1 : sa === sb ? 0.5 : 0);
     function matchupMatrix(us, them) {
       return us.map(a => them.map(b => {
         const off = duel(a, b), def = duel(b, a), sa = speedOf(a), sb = speedOf(b);
-        return { off, def, sa, sb, v: off.o - 0.6 * def.o + 0.25 * (sa > sb ? 1 : sa === sb ? 0.5 : 0) };
+        return { off, def, sa, sb, v: cellV(off, def, sa, sb) };
       }));
     }
     function scoreBring(M, us, idxs) {
       const nB = M[0].length; let s = 0;
       for (let j = 0; j < nB; j++) s += Math.max(...idxs.map(i => M[i][j].v));
-      s += 0.35 * idxs.reduce((t, i) => t + M[i].reduce((u, c) => u + c.v, 0) / nB, 0);
+      s += MODEL.avg * idxs.reduce((t, i) => t + M[i].reduce((u, c) => u + c.v, 0) / nB, 0);
       const fl = idxs.map(i => roleFlags(us[i]));
-      if (fl.some(f => f.speedCtrl)) s += 0.4;
-      if (fl.some(f => f.fakeOut)) s += 0.3;
-      if (idxs.some(i => /Intimidate/.test(us[i].ability + " " + (us[i]._baseAbility || "")))) s += 0.2;
-      if (idxs.filter(i => isMega(us[i])).length > 1) s -= 0.25;
+      const r = MODEL.role;
+      if (fl.some(f => f.speedCtrl)) s += 0.4 * r;
+      if (fl.some(f => f.fakeOut)) s += 0.3 * r;
+      if (idxs.some(i => /Intimidate/.test(us[i].ability + " " + (us[i]._baseAbility || "")))) s += 0.2 * r;
+      if (idxs.filter(i => isMega(us[i])).length > 1) s -= 0.25 * r;
       return s;
     }
     function combos(n, k) { const out = []; const rec = (st, acc) => { if (acc.length === k) { out.push(acc.slice()); return; } for (let i = st; i < n; i++) { acc.push(i); rec(i + 1, acc); acc.pop(); } }; rec(0, []); return out; }
     // The same matrix seen from the other side (no recomputation)
     function flipMatrix(M) {
-      return M[0].map((_, j) => M.map(row => { const c = row[j]; return { off: c.def, def: c.off, sa: c.sb, sb: c.sa, v: c.def.o - 0.6 * c.off.o + 0.25 * (c.sb > c.sa ? 1 : c.sb === c.sa ? 0.5 : 0) }; }));
+      return M[0].map((_, j) => M.map(row => { const c = row[j]; return { off: c.def, def: c.off, sa: c.sb, sb: c.sa, v: cellV(c.def, c.off, c.sb, c.sa) }; }));
     }
     function bestBring(us, them, M0) {
       const M = M0 || matchupMatrix(us, them);
@@ -4435,11 +4443,9 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
         ...COMMUNITY_TEAMS.map((t, i) => ({ id: "c" + i, name: (t.yt ? "YouTube: " : "Community: ") + t.name, team: communityTeamObjs(t) }))
       ].filter(o => o.team.length >= 4));
     }
-    // ponytail: logistic on the bring-4 score gap, hand-tuned so typical gaps land in 20–80%. Not fit to real results.
-    const EDGE_K = 0.9;
     function matchOdds(us, them) {
       const M = matchupMatrix(us, them), R = bestBring(us, them, M), Rt = bestBring(them, us, flipMatrix(M));
-      return { p: 1 / (1 + Math.exp(-EDGE_K * (R.best.s - Rt.best.s))), M, bring: R.best.c, lead: R.leads.pair, theirs: Rt.best.c };
+      return { p: 1 / (1 + Math.exp(-MODEL.k * (R.best.s - Rt.best.s))), M, bring: R.best.c, lead: R.leads.pair, theirs: Rt.best.c };
     }
     const tick = () => new Promise(r => setTimeout(r, 0));
     let gRun = 0, lastGauntlet = null;
@@ -4465,8 +4471,8 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
       const prev = lastGauntlet; lastGauntlet = { avg, key: us.map(p => p.name).join() };
       const delta = prev ? (avg - prev.avg) * 100 : null;
       const pct = x => (x * 100).toFixed(1) + "%";
-      const col = p => `hsl(${Math.round(p * 120)} 65% 45%)`;
-      const hist = Array(10).fill(0); res.forEach(r => hist[Math.min(9, Math.floor(r.p * 10))]++);
+      const col = p => `hsl(${Math.round(Math.max(0, Math.min(1, (p - 0.5) * 4 + 0.5)) * 120)} 65% 45%)`; // ponytail: colour stretched ×4 around 50% since calibrated rates sit near it
+      const hist = Array(10).fill(0); res.forEach(r => hist[Math.max(0, Math.min(9, Math.floor(((r.p - 0.5) * 2 + 0.5) * 10)))]++); // bands of 5 pts, 25%–75%
       const hMax = Math.max(...hist, 1);
       // How often each member makes the bring-4 / the lead
       const bring = us.map((_, i) => res.filter(r => r.bring.includes(i)).length / n);
@@ -4487,9 +4493,12 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
         <section class="panel"><div class="g-hero">
           <div><div class="muted small">Expected win rate vs ${n} teams</div><div class="g-big" style="color:${col(avg)}">${pct(avg)}</div>
             ${delta != null ? `<div class="g-delta ${delta >= 0 ? "up" : "down"}">${delta >= 0 ? "▲" : "▼"} ${Math.abs(delta).toFixed(1)} pts vs last run</div>` : ""}
-            <div class="muted small">Favoured in ${res.filter(r => r.p > 0.5).length} · coin-flip in ${res.filter(r => r.p >= 0.4 && r.p <= 0.6).length} · unfavoured in ${res.filter(r => r.p < 0.4).length}</div></div>
-          <div class="g-hist" title="How many opponents fall in each win-chance band (0% → 100%)">${hist.map((h, i) => `<div style="height:${h / hMax * 100}%;background:${col((i + 0.5) / 10)}" title="${i * 10}–${i * 10 + 10}%: ${h} teams"></div>`).join("")}</div>
-        </div></section>
+            <div class="muted small">Favoured in ${res.filter(r => r.p > 0.55).length} · close in ${res.filter(r => r.p >= 0.45 && r.p <= 0.55).length} · unfavoured in ${res.filter(r => r.p < 0.45).length}</div></div>
+          <div class="g-hist" title="How many opponents fall in each win-chance band (25% → 75%, 5 pts each; the ends include everything beyond)">${hist.map((h, i) => `<div style="height:${h / hMax * 100}%;background:${col((i + 0.5) / 10)}" title="${25 + i * 5}–${30 + i * 5}%: ${h} teams"></div>`).join("")}</div>
+        </div>
+        <details class="sub-fold" style="margin-top:0.6rem"><summary>How accurate is this?</summary><div class="muted small" style="margin-top:0.3rem">
+          Checked against 94 real top-cut matches from 14 events (finals, semis and quarters, best-of-3). Between teams good enough to reach a top 8, the model predicts no better than a coin flip: it called 8 of 14 finals, and skill decides those games. It does separate real tournament teams from random builds (real teams come out ahead 62% of the time). Win rates use the most confident scale the real results still allow, so <strong>a few points of difference is noise</strong>. Use this to avoid weak teams and fix bad matchups, not to split hairs between good ones.</div></details>
+        </section>
         <div class="two-col">
           <section class="panel"><h3>Worst matchups</h3>${sorted.slice(0, 8).map(row).join("")}</section>
           <section class="panel"><h3>Best matchups</h3>${sorted.slice(-5).reverse().map(row).join("")}</section>
@@ -4509,8 +4518,8 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
     function evoFitness(team, sample) {
       const us = team.map(activeTeamMember);
       let s = 0; sample.forEach(o => s += matchOdds(us, o.team).p);
-      const shared = worstSharedWeak(us).n > MAX_SHARED_WEAK ? 0.08 : 0;
-      return s / sample.length + evaluateTeam(team).score / 2500 - shared;
+      const shared = worstSharedWeak(us).n > MAX_SHARED_WEAK ? 0.015 : 0;
+      return s / sample.length + evaluateTeam(team).score / 15000 - shared;
     }
     function evoMutate(team) {
       const free = team.map((_, i) => i).filter(i => !locked.has(team[i].name));
@@ -4548,7 +4557,7 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
         for (let k = 0; k < 3; k++) { // 3 tries per generation
           const m = evoMutate(best); if (!m) continue;
           const f = evoFitness(m.t, sample);
-          if (f > bestFit + 0.001) { if (say) say(`Gen ${g} · <b>${m.msg}</b> · ${fmt(bestFit)} → ${fmt(f)}`); best = m.t; bestFit = f; wins++; break; }
+          if (f > bestFit + 0.0002) { if (say) say(`Gen ${g} · <b>${m.msg}</b> · ${fmt(bestFit)} → ${fmt(f)}`); best = m.t; bestFit = f; wins++; break; }
         }
       }
       return { team: best, fit: bestFit, wins };
@@ -4576,7 +4585,7 @@ Wood Hammer:Grass:P:120:cr|X-Scissor:Bug:P:80:cl|Zap Cannon:Electric:S:120:xB|Sl
           const t2 = enforceItems(t, keep);
           if (megaCount(t2) < Math.min(MIN_MEGAS, megaCount(best))) continue;
           const f = evoFitness(t2, sample);
-          if (f > bestFit + 0.001) { say(`Polish · <b>${best[i].name}${c.name === best[i].name ? " set → " + c._setLabel : " → " + c.name}</b> · ${fmt(bestFit)} → ${fmt(f)}`); best = t2; bestFit = f; }
+          if (f > bestFit + 0.0002) { say(`Polish · <b>${best[i].name}${c.name === best[i].name ? " set → " + c._setLabel : " → " + c.name}</b> · ${fmt(bestFit)} → ${fmt(f)}`); best = t2; bestFit = f; }
         }
       }
       return best;
